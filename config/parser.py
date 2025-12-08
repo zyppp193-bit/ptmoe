@@ -198,6 +198,21 @@ class Parser:
         parser.add_argument('--dist-strat', default='vanilla')
         parser.add_argument('--binary-dist', action='store_true')
         parser.add_argument('--sd-strat', default="vanilla")
+        # 修改说明：以下参数用于控制 timm 预训练 ViT 教师与基于其特征的 MoE 门控路由。
+        # - timm_* 负责拉起 ImageNet21K 预训练的 ViT（默认 vit_base_patch16_224），并指定加载的预训练配置。
+        # - n-teacher 控制 MoE/EMA 专家的数量（默认 4 个）。
+        # - moe_* 以 ViT 的 CLS/中间层特征为门控信号，决定从多个 EMA 教师里挑选哪些专家（可设 top-k，默认 1 个）参与加权蒸馏；
+        #   moe-beta 则控制 MoE logits 与原始 ViT logits 融合时的权重分配（β 与 1-β）。
+        parser.add_argument('--n-teacher', type=int, default=4, help='Number of EMA/MoE experts (default: 4).')
+        parser.add_argument('--timm-teacher', action='store_true', help='Use a timm model as fixed teacher.')
+        parser.add_argument('--timm-teacher-name', default=None, help='timm 模型名称；默认自动寻找可用的 ImageNet21K ViT（优先 vit_base/large/small/tiny *_in21k），如果都不可用则回退 vit_base_patch16_224。')
+        parser.add_argument('--timm-pretrained-cfg', default=None, help='timm 预训练配置标签；留空会优先尝试 augreg_in21k / imagenet21k / imagenet21k_ft1k，再回退默认权重。')
+        parser.add_argument('--timm-pretrained-url', default=None, help='可选的 ImageNet21K 权重直链（npz/pth）；当 timm 标签无效时会用此 URL 作为回退下载。')
+        parser.add_argument('--moe-teacher', action='store_true', help='Enable ViT-gated MoE routing over EMA teachers.')
+        parser.add_argument('--moe-use-intermediate', action='store_true', help='Use intermediate ViT layer output for MoE gating instead of final CLS token.')
+        parser.add_argument('--moe-intermediate-index', type=int, default=-1, help='Index of the intermediate layer output to use when gating.')
+        parser.add_argument('--moe-top-k', type=int, default=1, help='Route to top-k EMA experts when computing MoE logits (default: 1).')
+        parser.add_argument('--moe-beta', type=float, default=0.5, help='融合 MoE logits 与 ViT logits 的权重 β，另一侧权重为 1-β。')
         # EMA params
         parser.add_argument('--ema-alpha', type=float, default=0.1)
         parser.add_argument('--ema-beta', type=float, default=0.01)
@@ -220,7 +235,6 @@ class Parser:
         # MMKD with a better alpha search
         parser.add_argument('--alpha-min', type=float, default=0.01)
         parser.add_argument('--alpha-max', type=float, default=0.01)
-        parser.add_argument('--n-teacher', type=int, default=1)
         # SDP params
         parser.add_argument('--sdp-mu', type=int, default=100)
         parser.add_argument('--sdp-c2', type=float, default=0.75)
