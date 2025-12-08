@@ -4,6 +4,20 @@ The paper has been accepted at ICML 2024.
 
 ![Illustration of our approach](illustration.png)
 
+## 用简单中文介绍本仓库新增的内容
+
+近期的更新加入了一种额外的“教师模型”选项，方便你在 ER-EMA 学习器中直接使用 timm 库里的预训练 Vision Transformer（ViT）。这里用初学者能听懂的话说明一下：
+
+> 修改说明：本段文字专门新增，用来逐步说明“新增了什么”“为什么要用它们”以及“如何开启”。内容涵盖：如何用 timm 拉起 ImageNet21K 预训练的 ViT 当教师、怎样基于 ViT 的 [CLS]/中间层特征做 MoE 门控路由、以及对应命令行开关的位置。
+
+- **为什么要这样做？** 传统的 EMA 教师只来自当前模型的滑动平均，效果有限。现在可以把 timm 中基于 ImageNet21K 训练好的 ViT 当成固定的老师，给学生模型提供更稳定的知识蒸馏信号。
+- **需要安装什么？** `requirements.txt` 已经添加了 `timm`，按仓库推荐的方式运行 `pip install -r requirements.txt` 就会自动安装。
+- **怎么开启？** 运行训练脚本时额外加上 `--timm-teacher` 选项即可启用；默认会用 `vit_base_patch16_224` 且加载 ImageNet21K 权重。如果想换模型或预训练权重，可以通过 `--timm-teacher-name` 与 `--timm-pretrained-cfg` 参数自定义。
+- **效果如何融合？** 训练时，学生模型同时向多个 EMA 教师和 timm 的 ViT 教师学习，它们的输出会一起参与蒸馏损失，帮助学生学得更好。
+- **想要 MoE 路由？** 你可以在启用 `--timm-teacher` 的基础上，再加上 `--moe-teacher`。这样会用预训练 ViT 的 [CLS] 或中间层特征做“门控”，按 `--moe-top-k`（默认路由一个专家）从多个 EMA 教师里挑选专家并加权输出；可以用 `--n-teacher` 设定 MoE/EMA 专家总数（默认 4 个），并用 `--moe-beta` 将 MoE logits 与原始 ViT logits 按 β、1-β 融合后再送入蒸馏。
+
+如果你是第一次接触，只需记住：安装依赖后，在原有命令后面加上 `--timm-teacher` 就能使用预训练的 ViT 做老师，无需额外改代码。
+
 # Project structure
 
 ```bash
