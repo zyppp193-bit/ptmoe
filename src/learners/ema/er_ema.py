@@ -43,6 +43,55 @@ scaler = amp.GradScaler()
 LR_MIN = 5e-4
 LR_MAX = 5e-2
 
+# 优先尝试的 ImageNet21K 预训练 ViT 模型名列表（均在 timm 中常见）。
+IN21K_PREFERRED = [
+    "vit_tiny_patch16_224_in21k",
+    "vit_small_patch32_224_in21k",
+    "vit_small_patch16_224_in21k",
+    "vit_base_patch32_224_in21k",
+    "vit_base_patch16_224_in21k",
+    "vit_base_patch8_224_in21k",
+    "vit_large_patch32_224_in21k",
+    "vit_large_patch16_224_in21k",
+    "vit_huge_patch14_224_in21k",
+]
+
+# 来自 Google 提供的 ImageNet21K 预训练权重（npz/pth），可直接作为 timm teacher 的下载源。
+IN21K_FALLBACK_URLS = {
+    "vit_tiny_patch16_224_in21k": "https://storage.googleapis.com/vit_models/augreg/Ti_16-i21k-300ep-lr_0.001-aug_none-wd_0.03-do_0.0-sd_0.0.npz",
+    "vit_small_patch32_224_in21k": "https://storage.googleapis.com/vit_models/augreg/S_32-i21k-300ep-lr_0.001-aug_light1-wd_0.03-do_0.0-sd_0.0.npz",
+    "vit_small_patch16_224_in21k": "https://storage.googleapis.com/vit_models/augreg/S_16-i21k-300ep-lr_0.001-aug_light1-wd_0.03-do_0.0-sd_0.0.npz",
+    "vit_base_patch32_224_in21k": "https://storage.googleapis.com/vit_models/augreg/B_32-i21k-300ep-lr_0.001-aug_medium1-wd_0.03-do_0.0-sd_0.0.npz",
+    "vit_base_patch16_224_in21k": "https://storage.googleapis.com/vit_models/augreg/B_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0.npz",
+    "vit_base_patch8_224_in21k": "https://storage.googleapis.com/vit_models/augreg/B_8-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.0-sd_0.0.npz",
+    "vit_large_patch32_224_in21k": "https://github.com/rwightman/pytorch-image-models/releases/download/v0.1-vitjx/jx_vit_large_patch32_224_in21k-9046d2e7.pth",
+    "vit_large_patch16_224_in21k": "https://storage.googleapis.com/vit_models/augreg/L_16-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.1-sd_0.1.npz",
+    "vit_huge_patch14_224_in21k": "https://storage.googleapis.com/vit_models/imagenet21k/ViT-H_14.npz",
+}
+
+
+def _extract_default_cfg_url(cfg_entry):
+    """兼容 timm default_cfgs 中不同类型的配置对象，提取其 url 字段。"""
+
+    if cfg_entry is None:
+        return None
+
+    if isinstance(cfg_entry, dict):
+        return cfg_entry.get("url") or cfg_entry.get("hf_hub_id")
+
+    # PretrainedCfg 对象既支持属性访问也支持类似 dict 的 get
+    url = getattr(cfg_entry, "url", None)
+    if url:
+        return url
+
+    get_fn = getattr(cfg_entry, "get", None)
+    if callable(get_fn):
+        try:
+            return get_fn("url", None) or get_fn("hf_hub_id", None)
+        except TypeError:
+            pass
+    return None
+
 
 class MoEGatingTeacher(nn.Module):
     """
@@ -188,18 +237,79 @@ class ER_EMALearner(ERLearner):
 
         import timm
 
-        teacher = timm.create_model(
-            self.params.timm_teacher_name,
-            pretrained=True,
-            pretrained_cfg=getattr(self.params, 'timm_pretrained_cfg', None),
-            num_classes=self.params.n_classes,
-        )
+        teacher_name = self.resolve_timm_teacher_name(timm)
+        teacher = self.build_timm_teacher(timm, teacher_name)
         for param in teacher.parameters():
             param.requires_grad = False
         teacher.eval()
         teacher.to(device)
         return teacher
 
+    def resolve_timm_teacher_name(self, timm):
+        """
+        只允许使用 ImageNet21K 预训练的 ViT：
+        - 若用户指定了 timm_teacher_name 且可用，则直接使用（推荐 *_in21k 变体）。
+        - 否则按 IN21K_PREFERRED 顺序选择本地可用的 in21k 模型。
+        - 若本地 timm 不包含任何 in21k 变体，则直接报错，提示安装带有 in21k 权重的 timm 包。
+        """
+
+        requested = getattr(self.params, "timm_teacher_name", None)
+        available = set(timm.list_models(pretrained=True))
+
+        if requested:
+            if requested in available:
+                if requested not in IN21K_FALLBACK_URLS:
+                    lg.warning("建议使用 *_in21k 变体以匹配 Google 权重；当前模型将尝试使用提供的 URL 或 default_cfgs 下载。")
+                return requested
+            lg.warning("用户指定的 timm 教师在当前环境不可用，尝试自动选择 in21k 变体。")
+
+        for name in IN21K_PREFERRED:
+            if name in available:
+                lg.warning(
+                    f"自动选择可用的 ImageNet21K 预训练模型：{name}。如需固定请显式传入 --timm-teacher-name 并保证本地可用。"
+                )
+                return name
+
+        raise RuntimeError(
+            "本地 timm 未找到任何 ImageNet21K ViT（*_in21k）。请安装包含 in21k 变体的 timm 或手动指定 --timm-teacher-name 并准备对应 URL。"
+        )
+
+    def build_timm_teacher(self, timm, teacher_name):
+        """
+        仅加载 Google 提供的 ImageNet21K 权重：
+        - 优先使用用户指定的 --timm-pretrained-url（npz/pth），直接通过 pretrained_cfg_overlay 下载。
+        - 若未显式给定 URL，则从 timm default_cfgs 解析或内置回退表寻找 Google in21k 链接，同样用 overlay 拉取。
+        - 仅当用户提供了 timm_pretrained_cfg 时才尝试对应标签，否则默认不再走 timm 的 1K 权重。
+        """
+
+        user_cfg = getattr(self.params, "timm_pretrained_cfg", None)
+        user_url = getattr(self.params, "timm_pretrained_url", None)
+
+        vit_default_cfgs = getattr(timm.models.vision_transformer, "default_cfgs", {})
+        cfg_entry = vit_default_cfgs.get(teacher_name)
+        default_url = _extract_default_cfg_url(cfg_entry)
+
+        chosen_url = user_url or default_url or IN21K_FALLBACK_URLS.get(teacher_name)
+        if not chosen_url:
+            raise RuntimeError(
+                "未找到可用的 Google ImageNet21K 权重 URL。请通过 --timm-pretrained-url 提供 npz/pth 直链，或选择包含 in21k 权重的 timm 模型。"
+            )
+
+        overlay = {"url": chosen_url, "file": chosen_url}
+        lg.info(f"将通过 URL 加载 ImageNet21K 权重：{chosen_url}")
+
+        pretrained_cfg = user_cfg if user_cfg else None
+        try:
+            return timm.create_model(
+                teacher_name,
+                pretrained=True,
+                num_classes=self.params.n_classes,
+                pretrained_cfg=pretrained_cfg,
+                pretrained_cfg_overlay=overlay,
+            )
+        except RuntimeError as e:
+            lg.warning(f"timm 按 URL 加载 {teacher_name} 失败，错误：{e}")
+            raise
     def init_moe_teacher(self):
         """
         Initialize a routing MoE teacher that uses ViT features from the timm teacher

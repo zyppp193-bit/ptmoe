@@ -12,11 +12,47 @@ The paper has been accepted at ICML 2024.
 
 - **为什么要这样做？** 传统的 EMA 教师只来自当前模型的滑动平均，效果有限。现在可以把 timm 中基于 ImageNet21K 训练好的 ViT 当成固定的老师，给学生模型提供更稳定的知识蒸馏信号。
 - **需要安装什么？** `requirements.txt` 已经添加了 `timm`，按仓库推荐的方式运行 `pip install -r requirements.txt` 就会自动安装。
-- **怎么开启？** 运行训练脚本时额外加上 `--timm-teacher` 选项即可启用；默认会用 `vit_base_patch16_224` 且加载 ImageNet21K 权重。如果想换模型或预训练权重，可以通过 `--timm-teacher-name` 与 `--timm-pretrained-cfg` 参数自定义。
+- **怎么开启？** 运行训练脚本时额外加上 `--timm-teacher` 选项即可启用；默认只会在 timm 中查找可用的 ImageNet21K 预训练 ViT（tiny/small/base/large/huge 这些 `_in21k` 变体，如 `vit_base_patch16_224_in21k`），若未找到任何 in21k 变体则直接报错，以避免回退到 ImageNet1K 权重。教师权重会优先通过 URL 下载：你可以用 `--timm-pretrained-url` 显式给出 Google 发布的 in21k npz/pth 直链；若未指定则从 timm 的 `default_cfgs` 自动解析 URL，再结合内置的 in21k 链接表确保下载成功。如果想固定模型或补充标签，可通过 `--timm-teacher-name`、`--timm-pretrained-cfg` 传入，代码会在保持 URL 权重的前提下加载；常见可选的 in21k 模型有：`vit_tiny_patch16_224_in21k`、`vit_small_patch32_224_in21k`、`vit_small_patch16_224_in21k`、`vit_base_patch32_224_in21k`、`vit_base_patch16_224_in21k`、`vit_base_patch8_224_in21k`、`vit_large_patch32_224_in21k`、`vit_large_patch16_224_in21k`、`vit_huge_patch14_224_in21k`，相应的 Google 下载地址已写入代码。
 - **效果如何融合？** 训练时，学生模型同时向多个 EMA 教师和 timm 的 ViT 教师学习，它们的输出会一起参与蒸馏损失，帮助学生学得更好。
 - **想要 MoE 路由？** 你可以在启用 `--timm-teacher` 的基础上，再加上 `--moe-teacher`。这样会用预训练 ViT 的 [CLS] 或中间层特征做“门控”，按 `--moe-top-k`（默认路由一个专家）从多个 EMA 教师里挑选专家并加权输出；可以用 `--n-teacher` 设定 MoE/EMA 专家总数（默认 4 个），并用 `--moe-beta` 将 MoE logits 与原始 ViT logits 按 β、1-β 融合后再送入蒸馏。
 
 如果你是第一次接触，只需记住：安装依赖后，在原有命令后面加上 `--timm-teacher` 就能使用预训练的 ViT 做老师，无需额外改代码。
+
+### 推荐的 ViT + MoE 训练设置（拿去直接跑）
+
+下面给出一套可以直接复现的命令行配置，帮你把 ImageNet21K 预训练的 ViT 当教师，同时开启 MoE 门控（默认 4 个 EMA 专家、top-k=1）：
+
+```bash
+python main.py \
+  --train \
+  --learner ER_EMA \
+  --dataset cifar10 \
+  --training-type inc \
+  --n-tasks 5 \
+  --img-size 224 \
+  --batch-size 64 \
+  --mem-size 500 \
+  --mem-batch-size 64 \
+  --buffer reservoir \
+  --optim Adam \
+  --learning-rate 5e-4 \
+  --temperature 2.0 \
+  --timm-teacher \
+  --timm-teacher-name vit_base_patch16_224_in21k \
+  --timm-pretrained-cfg augreg_in21k \
+  --moe-teacher \
+  --n-teacher 4 \
+  --moe-top-k 1 \
+  --moe-beta 0.5 \
+  --data-root-dir /path/to/your/data \
+  --results-root ./results/vit_moe_demo \
+  --no-wandb
+```
+
+- `--img-size 224`：让输入尺寸匹配 ViT 的预训练设置，避免 teacher 端形状不一致。
+- `--n-teacher 4` + `--moe-top-k 1`：默认 4 个 EMA 专家，门控只激活 1 个，符合“只更新被选中的专家”的稀疏路由设定。
+- `--moe-beta 0.5`：MoE logits 与 ViT logits 各占一半，β、1-β 可按需要调整。
+- 其余超参（batch size、Adam、learning rate、memory 等）都是在 CIFAR-10 增量 5 任务上跑得通的起点，你可以据此微调。
 
 # Project structure
 
