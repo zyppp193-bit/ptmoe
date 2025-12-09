@@ -70,6 +70,29 @@ IN21K_FALLBACK_URLS = {
 }
 
 
+def _extract_default_cfg_url(cfg_entry):
+    """兼容 timm default_cfgs 中不同类型的配置对象，提取其 url 字段。"""
+
+    if cfg_entry is None:
+        return None
+
+    if isinstance(cfg_entry, dict):
+        return cfg_entry.get("url") or cfg_entry.get("hf_hub_id")
+
+    # PretrainedCfg 对象既支持属性访问也支持类似 dict 的 get
+    url = getattr(cfg_entry, "url", None)
+    if url:
+        return url
+
+    get_fn = getattr(cfg_entry, "get", None)
+    if callable(get_fn):
+        try:
+            return get_fn("url", None) or get_fn("hf_hub_id", None)
+        except TypeError:
+            pass
+    return None
+
+
 class MoEGatingTeacher(nn.Module):
     """
     A lightweight routing MoE that uses frozen ViT features as gating signals for EMA experts.
@@ -247,21 +270,23 @@ class ER_EMALearner(ERLearner):
 
     def build_timm_teacher(self, timm, teacher_name):
         """
-        按优先级尝试不同的 ImageNet21K 预训练标签，并在标签无效时回退到 Google 提供的 in21k URL。
-        优先级：
-        1) 用户通过 --timm-pretrained-cfg 显式指定的标签。
-        2) 内置候选标签 [augreg_in21k, imagenet21k, imagenet21k_ft1k]。
-        3) 使用自定义 URL（用户传入或 IN21K_FALLBACK_URLS 中的默认地址）。
-        4) timm 默认预训练权重（可能是 ImageNet1K），保证至少能成功加载。
+        优先加载 ImageNet21K 预训练的 ViT：先尝试 timm 内置的 in21k/augreg 标签，
+        再尝试 default_cfgs 中的 Google 官方权重 URL（npz/pth），最后兜底回退为 timm 默认权重。
         """
 
         user_cfg = getattr(self.params, "timm_pretrained_cfg", None)
         user_url = getattr(self.params, "timm_pretrained_url", None)
 
+        # 从 timm 自带的 default_cfgs 里读取该模型的默认权重 URL（若存在 in21k 配置则可直接复用）。
+        vit_default_cfgs = getattr(timm.models.vision_transformer, "default_cfgs", {})
+        cfg_entry = vit_default_cfgs.get(teacher_name)
+        default_url = _extract_default_cfg_url(cfg_entry)
+
         cfg_candidates = []
         if user_cfg:
             cfg_candidates.append(user_cfg)
-        cfg_candidates.extend(["augreg_in21k", "imagenet21k", "imagenet21k_ft1k", None])
+        # timm 常见的 ImageNet21K 标签，优先覆盖默认的 in21k 权重。
+        cfg_candidates.extend(["in21k", "augreg_in21k", "in21k_ft1k", None])
 
         # 依次尝试 timm 支持的 pretrained_cfg，遇到无效标签继续尝试下一个。
         for cfg in cfg_candidates:
@@ -273,7 +298,7 @@ class ER_EMALearner(ERLearner):
                     num_classes=self.params.n_classes,
                 )
                 if cfg:
-                    lg.info(f"timm 教师已使用 pretrained_cfg={cfg} 加载（如为 in21k/augreg 则对应 ImageNet21K 权重）。")
+                    lg.info(f"timm 教师已使用 pretrained_cfg={cfg} 加载（如果为 in21k/augreg 则对应 ImageNet21K 权重）。")
                 return teacher
             except RuntimeError as e:
                 if "Invalid pretrained tag" in str(e):
@@ -281,32 +306,34 @@ class ER_EMALearner(ERLearner):
                     continue
                 raise
 
-        # 如果 timm 没有可用标签，尝试使用 Google 提供的 in21k 权重 URL（npz/pth）。
-        fallback_url = user_url or IN21K_FALLBACK_URLS.get(teacher_name)
+        # 如果 timm 标签均无效，优先使用用户传入的 URL，其次尝试 timm default_cfgs/内置回退表里的 Google 官方权重。
+        fallback_url = user_url or default_url or IN21K_FALLBACK_URLS.get(teacher_name)
         if fallback_url:
             lg.warning(
                 f"未找到有效的 timm pretrained_cfg，尝试使用 ImageNet21K 回退 URL 加载 {teacher_name}：{fallback_url}"
             )
+            overlay = {"url": fallback_url}
+            # npz 权重常来自 Google 官方，直接用 url 也可由 timm 下载；若需要本地文件同名键也可兼容。
+            overlay["file"] = fallback_url
             try:
                 return timm.create_model(
                     teacher_name,
                     pretrained=True,
                     num_classes=self.params.n_classes,
-                    pretrained_cfg_overlay={"url": fallback_url},
+                    pretrained_cfg_overlay=overlay,
                 )
             except Exception as e:  # 捕获所有异常，以便给出清晰提示
                 lg.error(
                     f"使用回退 URL 加载 {teacher_name} 失败，请检查网络/URL 是否可访问，或改用 --timm-teacher-name 指定其他 in21k 模型。错误: {e}"
                 )
 
-        # 最后兜底使用 timm 默认权重，保证训练流程不被中断。
+        # 最后兜底使用 timm 默认预训练权重，保证训练流程不被中断。
         lg.warning("使用 timm 默认预训练权重（可能是 ImageNet1K），若需 ImageNet21K 请提供有效 cfg 或 URL。")
         return timm.create_model(
             teacher_name,
             pretrained=True,
             num_classes=self.params.n_classes,
         )
-
     def init_moe_teacher(self):
         """
         Initialize a routing MoE teacher that uses ViT features from the timm teacher
