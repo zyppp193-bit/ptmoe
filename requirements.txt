@@ -51,6 +51,8 @@ threadpoolctl==3.6.0
 tifffile==2025.3.13
 torch==2.6.0
 torchvision==0.21.0
+# 修改说明：增加 timm 依赖，用于：1) 直接创建带 ImageNet21K 预训练权重的 ViT 教师；2) 提取 CLS/中间层特征给 MoE 路由做门控；3) 让蒸馏时能把 ViT 与门控专家的 logits 一并融合。
+timm==1.0.22
 tqdm==4.67.1
 typing_extensions==4.12.2
 tzdata==2025.1
